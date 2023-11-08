@@ -1,0 +1,200 @@
+---
+title: "Saint Paul 1% Sales Tax Vote Map by Ward/Precinct"
+output: html_document
+
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(terra)
+library(tidyterra)
+library(ggplot2)
+library(rvest)
+library(sf)
+library(leaflet)
+library(glue)
+library(DT)
+
+```
+
+```{r data, echo = FALSE,  warning = FALSE}
+
+
+#shapefile from https://gisdata.mn.gov/dataset/bdry-votingdistricts
+file <- 'C:/Users/LJ/Downloads/shp_bdry_votingdistricts/bdry_votingdistricts.shp'
+
+#read in shapefile
+voting_districts <- vect(file)
+
+#change projection
+vd2 <- project(voting_districts, "EPSG:4326")
+
+vd3 <- vd2 %>%
+  #filter to Ramsey County, Saint Paul
+  filter(toupper(COUNTYNAME) %in% "RAMSEY" & MCDNAME %in% "St. Paul") %>%
+  #convert to SF object for easier interaction
+  st_as_sf()
+
+
+wards <- vd3 %>% 
+  group_by(WARD) %>% 
+  summarize(geometry = st_union(geometry))
+
+#read in data from results
+
+tax_precinct_results <- read_html("https://electionresults.sos.mn.gov/Results/Index?ersElectionId=157&scenario=ResultsByPrecinctCrosstab&QuestionId=1612")
+
+#keep the third table as it has the relevant information
+table_node <- html_nodes(tax_precinct_results,"table") %>% .[[3]]
+
+tax_tbl <- html_table(table_node) %>% # read the table from html to make a data frame
+  #set simpler names
+  setNames(c("precinct", "yes", "no" )) %>%
+  #drop out the commas and make numeric
+  mutate(across(2:3, ~ as.numeric(gsub("\\,", "",.))),
+  # calculate the total votes from yes and no
+         total = rowSums(across(2:3), na.rm = TRUE),
+         #calculat the percent of yes votes
+          pct_yes = round(yes/total  * 100, 1)
+  ) %>%
+  #clean up the names to align with the vote data
+  mutate( 
+    
+    ward = str_replace(precinct, "S.*(?=W)", "") %>% 
+    str_replace( "Ramsey:.*(?=W)", "") %>% 
+    str_replace(" P-\\d+$", "") %>%
+    str_replace("W-", "WARD ") %>%
+    as_factor(),
+    
+    prec = str_replace(precinct, "Ramsey: ", "") %>%
+  #remove the zero before the precinct number to align with the vote data
+    str_replace("(?<=P-)0(?=\\d)", "") %>%
+    str_replace(".*(?=P-\\d)", "") %>%
+    str_replace("P-", "PRECINCT ") %>%
+    as_factor(),
+  
+  precinct = str_replace(precinct, "Ramsey: ", "") %>%
+  #remove the zero before the precinct number to align with the vote data
+    str_replace_all("(?<=P-)0(?=\\d)", "")
+
+  ) %>%
+  select(precinct, ward, prec, everything())
+
+
+tax_map <- vd3 %>%
+  #set to upper
+  mutate(PCTNAME = toupper(PCTNAME)) %>%
+  #merge the vote data to the shapefile
+  left_join(tax_tbl, by = c("PCTNAME"= "precinct"))
+
+
+```
+
+<br/>
+<br/>
+
+## Table 1. Saint Paul Question 1 Results by Ward
+```{r table1, echo=FALSE}
+tab1 <- tax_tbl %>% 
+  group_by(ward = as_factor(ward)) %>%
+  summarize(across(c(yes, no, total), ~ sum(.x))) %>%
+  mutate(pct_yes = round(yes/total * 100, 1)) %>%
+  ungroup()
+
+datatable(tab1, rownames = FALSE, filter = "top", 
+          options = list(
+              autoWidth = TRUE)
+          
+)
+```
+
+
+<br/>
+<br/>
+
+## Table 2. Saint Paul Question 1 Results by Ward/Precinct
+```{r table2, echo=FALSE}
+tab2 <- tax_tbl %>% 
+  select(-precinct) %>% 
+  rename(precinct = prec)
+
+datatable(tab2, rownames = FALSE, filter = "top", 
+            options = list(
+              autoWidth = TRUE,
+              columnDefs = list(list(width = '100px', targets = c(2, 3),
+                                     width = '25px', targets = c(4,5,6,7)))
+            )
+)
+```
+
+<br/>
+<br/>
+
+## Figure 1: Map of Precinct Returns for Question 1
+```{r map, echo = FALSE, warning = FALSE} 
+
+tax_map2 <- tax_map  %>%
+  #create categories for the approval percent
+  mutate(maj_yes = case_when(pct_yes < 50 ~ "Under 50%", 
+                             pct_yes < 55 ~ "50-54.9%",
+                             pct_yes < 60 ~ "55-59.9%",
+                             pct_yes < 65 ~ "60-64.9%",
+                             pct_yes < 75 ~ "65-74.9%",
+                             TRUE ~ "75+") %>%
+           #set to factor to keep order
+           factor(levels = c("Under 50%", "50-54.9%", "55-59.9%", "60-64.9%", "65-74.9%", "75+")))
+
+factpal <- colorFactor(viridis::viridis_pal(option = "D")(6), domain = unique(rev(tax_map2$maj_yes)))
+
+#precinct labels
+labels <- glue(
+  "<strong>WARD:</strong> {ward}<br/> <strong>PRECINCT: </strong> {precinct}<br/> <strong>Total Votes: </strong> {total} <br/> <strong>% Yes: </strong> {pct}",
+  ward = tax_map2$ward,
+  precinct = tax_map2$prec,
+  total = tax_map2$total,
+  pct = tax_map2$pct_yes
+) %>% lapply(htmltools::HTML)
+
+map <- leaflet(data = tax_map2, height = 500, width = 800 ) %>%
+  setView(lng =  -93.09799, lat = 44.943305 , zoom = 12) %>%
+  addTiles() %>%
+  addPolylines(data = wards, weight = 3, smoothFactor = 0, color = "black", opacity = 1.0, fill = FALSE) %>%
+  addLabelOnlyMarkers(data = st_centroid(wards),
+                      label = ~ WARD,
+                      labelOptions = labelOptions(noHide = TRUE, direction = 'top', textsize = "14px", style = list("font-weight" = "bolder", padding = "3px 8px"), textOnly = TRUE)) %>%
+  addPolygons(
+    fillColor = ~ factpal(maj_yes),
+    weight = 1, 
+    color = "black",
+    #dashArray = "3",
+    fillOpacity = 0.7,
+    highlight = highlightOptions(
+      weight = 3,
+      fillOpacity = 0,
+      color = "black",
+      opacity = 1.0,
+      bringToFront = TRUE,
+      sendToBack = TRUE
+    ),
+    
+    ## Add label info when mouseover
+    label = labels, 
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px",
+                   textsize = "15px",
+                   direction = "auto")
+  )
+  ) %>%
+  addLegend(pal = factpal, values = ~maj_yes, opacity = 0.7, title = "% Voted Yes", position = "bottomright")
+
+
+map
+
+```
+
+
+### Sources <br/>
+[Shapefiles](https://gisdata.mn.gov/dataset/bdry-votingdistricts) <br/>
+[Returns Data](https://electionresults.sos.mn.gov/Results/Index?ersElectionId=157&scenario=ResultsByPrecinctCrosstab&QuestionId=1612) 
