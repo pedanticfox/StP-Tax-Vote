@@ -6,7 +6,7 @@ library(rvest)
 library(sf)
 
 #shapefile from https://gisdata.mn.gov/dataset/bdry-votingdistricts
-file <- 'C:/Users/LJ/Downloads/shp_bdry_votingdistricts/bdry_votingdistricts.shp'
+file <- 'C:/Users/<USER>/Downloads/shp_bdry_votingdistricts/bdry_votingdistricts.shp'
 
 #read in shapefile
 voting_districts <- vect(file)
